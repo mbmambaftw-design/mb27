@@ -172,6 +172,9 @@
     body.locked .g-team { pointer-events: none !important; cursor: default !important; }
     body.locked .g-pts { pointer-events: none !important; cursor: default !important; }
     body.locked .g-del { display: none !important; }
+    .gh-modal input { margin-bottom:10px; }
+    .gh-status { font-size:.75rem; margin-top:10px; min-height:18px; text-align:center; }
+    .gh-status.ok { color:#4caf50; } .gh-status.err { color:#e05555; } .gh-status.loading { color:var(--muted); }
     footer { border-top: 1px solid var(--border); padding: 20px; text-align: center; color: var(--muted); font-size: .75rem; }
     footer b { color: var(--accent); }
   </style>
@@ -189,6 +192,8 @@
     <li><button onclick="nav('stats',this)">&#128202; WC Stats</button></li>
   </ul>
   <button class="lock-btn" id="lockBtn" onclick="toggleLock()">&#128274; Edit</button>
+  <button class="lock-btn" id="publishBtn" onclick="publishToGitHub()" style="display:none;border-color:#4caf50;color:#4caf50">🚀 Publish</button>
+  <button class="lock-btn" id="ghSetupBtn" onclick="openGHModal()" style="display:none">⚙️ GH Setup</button>
 </nav>
 
 <!-- HOME -->
@@ -331,6 +336,29 @@
 
 <footer>Built by <b>MB27</b> &middot; All sports, all the time.</footer>
 
+<!-- GITHUB SETUP MODAL -->
+<div class="modal-bg" id="ghBg">
+  <div class="modal gh-modal" style="width:360px">
+    <h4>&#128025; GitHub Auto-Publish Setup</h4>
+    <div class="modal-meta">Stored in your browser only — never written into the HTML file.</div>
+    <label class="modal-label">Personal Access Token</label>
+    <input type="password" id="ghToken" placeholder="ghp_xxxxxxxxxxxx" autocomplete="off" />
+    <label class="modal-label">GitHub Username</label>
+    <input type="text" id="ghOwner" placeholder="yourusername" />
+    <label class="modal-label">Repository Name</label>
+    <input type="text" id="ghRepo" placeholder="sports-site" />
+    <label class="modal-label">File Path in Repo</label>
+    <input type="text" id="ghPath" placeholder="index.html" />
+    <label class="modal-label">Branch</label>
+    <input type="text" id="ghBranch" placeholder="main" />
+    <div class="gh-status" id="ghStatus"></div>
+    <div class="modal-btns">
+      <button class="btn btn-g" onclick="closeGHModal()">Cancel</button>
+      <button class="btn btn-p" onclick="saveGHConfig()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- TEAM EDIT MODAL -->
 <div class="modal-bg" id="modalBg">
   <div class="modal">
@@ -360,6 +388,73 @@
 </div>
 
 <script>
+// ── GitHub config (browser localStorage only, never in the file) ──
+const GH_KEY='mb27gh';
+function getGHConfig(){try{return JSON.parse(localStorage.getItem(GH_KEY));}catch(e){return null;}}
+function openGHModal(){
+  if(!isUnlocked()){openPwModal();return;}
+  const cfg=getGHConfig()||{};
+  document.getElementById('ghToken').value=cfg.token||'';
+  document.getElementById('ghOwner').value=cfg.owner||'';
+  document.getElementById('ghRepo').value=cfg.repo||'';
+  document.getElementById('ghPath').value=cfg.path||'index.html';
+  document.getElementById('ghBranch').value=cfg.branch||'main';
+  document.getElementById('ghStatus').textContent='';
+  document.getElementById('ghBg').classList.add('open');
+}
+function closeGHModal(){document.getElementById('ghBg').classList.remove('open');}
+function saveGHConfig(){
+  const cfg={token:document.getElementById('ghToken').value.trim(),owner:document.getElementById('ghOwner').value.trim(),repo:document.getElementById('ghRepo').value.trim(),path:document.getElementById('ghPath').value.trim()||'index.html',branch:document.getElementById('ghBranch').value.trim()||'main'};
+  if(!cfg.token||!cfg.owner||!cfg.repo){const s=document.getElementById('ghStatus');s.className='gh-status err';s.textContent='Token, username, and repo are required.';return;}
+  localStorage.setItem(GH_KEY,JSON.stringify(cfg));
+  closeGHModal();updatePublishBtn();
+}
+function updatePublishBtn(){
+  const u=isUnlocked(),cfg=getGHConfig();
+  document.getElementById('publishBtn').style.display=(u&&cfg)?'':'none';
+  document.getElementById('ghSetupBtn').style.display=u?'':'none';
+}
+document.getElementById('ghBg').addEventListener('click',e=>{if(e.target===e.currentTarget)closeGHModal();});
+
+// ── Source loader + BAKED_STATE ──
+let _pageSrc=null;
+fetch(location.href).then(r=>r.text()).then(s=>{_pageSrc=s;}).catch(()=>{});
+function buildExportHtml(){
+  if(!_pageSrc)return null;
+  const ts=Date.now(),baked=Object.assign({},state,{_bakedAt:ts}),marker='const BAKED_STATE = null; // set by export';
+  if(!_pageSrc.includes(marker))return null;
+  return _pageSrc.replace(marker,'const BAKED_STATE = '+JSON.stringify(baked)+'; // exported '+new Date(ts).toISOString());
+}
+
+// ── GitHub publish ──
+async function publishToGitHub(){
+  if(!isUnlocked()){openPwModal();return;}
+  const cfg=getGHConfig();
+  if(!cfg){openGHModal();return;}
+  if(!_pageSrc){alert('Page source not ready — wait a second and try again.');return;}
+  const exportHtml=buildExportHtml();
+  if(!exportHtml){alert('Could not build export HTML.');return;}
+  const btn=document.getElementById('publishBtn');
+  btn.textContent='Publishing…';btn.disabled=true;
+  try{
+    const apiBase='https://api.github.com/repos/'+cfg.owner+'/'+cfg.repo+'/contents/'+cfg.path;
+    const headers={'Authorization':'Bearer '+cfg.token,'Content-Type':'application/json','Accept':'application/vnd.github+json'};
+    const getRes=await fetch(apiBase+'?ref='+cfg.branch,{headers});
+    if(!getRes.ok){const e=await getRes.json();throw new Error(e.message||'GET failed '+getRes.status);}
+    const {sha}=await getRes.json();
+    const bytes=new TextEncoder().encode(exportHtml);
+    let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));
+    const content=btoa(bin);
+    const putRes=await fetch(apiBase,{method:'PUT',headers,body:JSON.stringify({message:'Update sports site – '+new Date().toLocaleString(),content,sha,branch:cfg.branch})});
+    if(!putRes.ok){const e=await putRes.json();throw new Error(e.message||'PUT failed '+putRes.status);}
+    btn.textContent='✅ Published!';
+    setTimeout(()=>{btn.textContent='🚀 Publish';btn.disabled=false;},3000);
+  }catch(err){
+    alert('Publish failed: '+err.message);
+    btn.textContent='🚀 Publish';btn.disabled=false;
+  }
+}
+
 // Password stored as SHA-256 hash (not readable from source)
 const PASS_HASH = 'c44bd1a1789fe129a4a70bdfb5273c6ee62f4089fa82050d5a108bcc403b9a8a';
 
@@ -395,12 +490,15 @@ function applyLockState() {
   btn.classList.toggle('unlocked',u);
   const tip=document.getElementById('editTip');
   if(tip) tip.innerHTML=u?'💡 <b>Click any team or score</b> in the bracket to edit — saves automatically':'🔒 <b>Unlock editing</b> with the button in the top-right';
+  updatePublishBtn();
 }
 document.getElementById('pwBg').addEventListener('click',e=>{if(e.target===e.currentTarget)closePwModal();});
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){closeModal();closePwModal();} });
 applyLockState();
+updatePublishBtn();
 
 // Data
+const BAKED_STATE = null; // set by export
 const SK='mb27v6';
 const defaultGroups=[
   {n:'A',t:['🇲🇽 Mexico','🇿🇦 South Africa','🇰🇷 South Korea','🇨🇿 Czechia'],p:[9,4,3,1]},
@@ -434,7 +532,7 @@ const defaultBracket={
     mkMatch('🇧🇷 Brazil','🇯🇵 Japan','Jun 29 - 1:00 PM','Houston, TX'),
     mkMatch('🇨🇮 Ivory Coast','🇳🇴 Norway','Jun 30 - 1:00 PM','Arlington, TX'),
     mkMatch('1st Group L','TBD','Jul 1 - 12:00 PM','Atlanta, GA'),
-    mkMatch('🇲🇽 Mexico','TBD','Jun 30 - 9:00 PM','Ciudad de Mexico, MEX'),
+    mkMatch('🇲🇽 Mexico','TBD','Jun 30 - 9':00 PM','Ciudad de Mexico, MEX'),
   ],
   r16:[
     mkMatch('TBD','TBD','Jul 6 - 3:00 PM','Arlington, TX'),mkMatch('TBD','TBD','Jul 6 - 8:00 PM','Seattle, WA'),
@@ -526,21 +624,35 @@ const GR=[
 ];
 
 function loadState(){
+  if(BAKED_STATE!==null){
+    try{
+      const s=localStorage.getItem(SK);
+      if(s){const d=JSON.parse(s);if(d._bakedAt&&d._bakedAt===BAKED_STATE._bakedAt){
+        if(!d.gr)d.gr=JSON.parse(JSON.stringify(BAKED_STATE.gr));
+        if(!d.stats)d.stats=JSON.parse(JSON.stringify(BAKED_STATE.stats));
+        if(!d.grStatted)d.grStatted=new Array(GR.length).fill(null);
+        if(!d.bracketStatted)d.bracketStatted={};
+        if(d.finalTitle===undefined)d.finalTitle=null;
+        return d;
+      }}
+    }catch(e){}
+    return JSON.parse(JSON.stringify(BAKED_STATE));
+  }
   try{
     const s=localStorage.getItem(SK);
     if(s){
       const d=JSON.parse(s);
-      if(!d.gr) d.gr=JSON.parse(JSON.stringify(GR));
-      if(!d.stats) d.stats=JSON.parse(JSON.stringify(DEFAULT_STATS));
-      if(!d.grStatted) d.grStatted=new Array(GR.length).fill(null);
-      if(!d.bracketStatted) d.bracketStatted={};
-      if(d.finalTitle===undefined) d.finalTitle=null;
+      if(!d.gr)d.gr=JSON.parse(JSON.stringify(GR));
+      if(!d.stats)d.stats=JSON.parse(JSON.stringify(DEFAULT_STATS));
+      if(!d.grStatted)d.grStatted=new Array(GR.length).fill(null);
+      if(!d.bracketStatted)d.bracketStatted={};
+      if(d.finalTitle===undefined)d.finalTitle=null;
       return d;
     }
   }catch(e){}
   return{groups:JSON.parse(JSON.stringify(defaultGroups)),bracket:JSON.parse(JSON.stringify(defaultBracket)),gr:JSON.parse(JSON.stringify(GR)),stats:JSON.parse(JSON.stringify(DEFAULT_STATS)),grStatted:new Array(GR.length).fill(null),bracketStatted:{},finalTitle:null};
 }
-function save(){try{localStorage.setItem(SK,JSON.stringify(state));}catch(e){}}
+function save(){try{const d=BAKED_STATE?Object.assign({},state,{_bakedAt:BAKED_STATE._bakedAt}):state;localStorage.setItem(SK,JSON.stringify(d));}catch(e){}}
 const state=loadState();
 
 // Nav
@@ -619,7 +731,7 @@ function saveGRScore(idx,side,el){
   const hg=state.gr[idx][3],ag=state.gr[idx][5];
   state.gr[idx][6]=hg>ag?'W':ag>hg?'L':'D';
   if(idx>=66){applyMatchStat(state.gr[idx][2],state.gr[idx][4],hg,ag);state.grStatted[idx]=[hg,ag];}
-  save();renderGR();renderStats();
+  save();recalcGroupStandings();renderGR();renderGroups();renderStats();
 }
 function renderStats(){
   const el=document.getElementById('statsTable');if(!el)return;
@@ -633,6 +745,21 @@ function renderStats(){
 }
 
 // Groups
+function recalcGroupStandings(){
+  state.groups.forEach((g,gi)=>{
+    const pts={},gfMap={},gaMap={};
+    g.t.forEach(t=>{const k=teamKey(t);pts[k]=0;gfMap[k]=0;gaMap[k]=0;});
+    state.gr.forEach(row=>{
+      const[,,h,hg,a,ag,r]=row;if(r==='')return;
+      const hk=teamKey(h),ak=teamKey(a);
+      if(!(hk in pts)||!(ak in pts))return;
+      gfMap[hk]+=hg;gaMap[hk]+=ag;gfMap[ak]+=ag;gaMap[ak]+=hg;
+      if(r==='W')pts[hk]+=3;else if(r==='L')pts[ak]+=3;else{pts[hk]++;pts[ak]++;}
+    });
+    const sorted=g.t.map(t=>[t,pts[teamKey(t)]||0,(gfMap[teamKey(t)]||0)-(gaMap[teamKey(t)]||0)]).sort((a,b)=>b[1]-a[1]||b[2]-a[2]);
+    state.groups[gi].t=sorted.map(x=>x[0]);state.groups[gi].p=sorted.map(x=>x[1]);
+  });
+}
 function renderGroups(){
   document.getElementById('groupsGrid').innerHTML=state.groups.map((g,gi)=>
     '<div class="g-card">'+
