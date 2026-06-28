@@ -421,7 +421,8 @@ let _pageSrc=null;
 fetch(location.href).then(r=>r.text()).then(s=>{_pageSrc=s;}).catch(()=>{});
 function buildExportHtml(){
   if(!_pageSrc)return null;
-  const ts=Date.now(),baked=Object.assign({},state,{_bakedAt:ts}),marker='const BAKED_STATE = null; // set by export';
+  const ts=Date.now(),baked=Object.assign({},state,{_bakedAt:ts});
+  const marker=['const BAKED_STATE','= null; // set by export'].join(' ');
   if(!_pageSrc.includes(marker))return null;
   return _pageSrc.replace(marker,'const BAKED_STATE = '+JSON.stringify(baked)+'; // exported '+new Date(ts).toISOString());
 }
